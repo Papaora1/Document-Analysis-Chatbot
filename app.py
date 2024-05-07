@@ -7,9 +7,8 @@ from src.cfg.config import *
 from src.cfg.logging_config import *
 import os
 
-
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={r"/*": {"origins": "http://localhost:3000"}})  # Allow requests from localhost:3000
 
 # Initialize the QuestionAnswerModel
 model = QuestionAnswerModel(EmbeddingsOptions.DEFAULT, ChainOptions.DEFAULT, VectorStoreOptions.DEFAULT,
