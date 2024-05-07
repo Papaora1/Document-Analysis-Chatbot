@@ -1,0 +1,10 @@
+venv
+logs
+.chroma
+temp
+client/node_modules
+client/package-lock.json
+test/.chroma
+test/logs
+.DS_Store
+.idea
