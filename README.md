@@ -29,7 +29,7 @@ Once you have installed the above software, you can proceed with the following s
 
 2. Navigate to the project directory:
 
-        cd ~/DocumentAnalysisChatbot/
+        cd Document-Analysis-Chatbot/
 
 3. Add OpenAI API Key to the following configuration file:
 
