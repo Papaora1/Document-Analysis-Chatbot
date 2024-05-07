@@ -31,23 +31,27 @@ Once you have installed the above software, you can proceed with the following s
 
         cd ~/DocumentAnalysisChatbot/
 
-3. Install the required python dependencies:
+3. Add OpenAI API Key to the following configuration file:
+
+        src/cfg/config.py
+
+4. Install the required python dependencies:
 
         pip install -r requirements.txt
 
-4. Navigate to client directory
+5. Navigate to client directory
 
         cd client
 
-5. Install required node dependencies
+6. Install required node dependencies
 
         npm install
 
-6. Navigate back to the project directory
+7. Navigate back to the project directory
 
         cd ..
 
-7. Run the chatbot application:
+8. Run the chatbot application:
 
         ./start_app.sh
 
