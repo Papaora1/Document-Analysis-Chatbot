@@ -8,9 +8,12 @@ Builds, from free global data:
   * gradients over a 200 m base, classified and grouped into steep sections;
   * 10 m contours (50 m index) in a corridor 1 km either side of the centreline.
 
+  * a horizontal alignment of straights and circular curves fitted to the centreline, with a
+    curve table (see alignment_fit.py).
+
 Outputs: KMZ (Google Earth), DXF plan (UTM 35S) and DXF long section (AutoCAD), LandXML alignment
-with existing-ground profiles and a GeoTIFF corridor surface (Civil 3D), Excel tables, a profile
-chart and a steep-section map.
+(lines and curves) with existing-ground profiles and a GeoTIFF corridor surface (Civil 3D), Excel
+tables, a profile chart and a steep-section map.
 
 Usage:
     pip install geopandas pyarrow rasterio contourpy ezdxf networkx scipy pyproj matplotlib openpyxl
@@ -46,6 +49,8 @@ import shapely.wkb
 from pyproj import Geod, Transformer
 from scipy import ndimage
 from shapely.ops import substring
+
+from alignment_fit import Fitter, fit_alignment
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
@@ -405,7 +410,7 @@ def kml_color(hex_rgb, alpha="ff"):
     return f"{alpha}{b}{g}{r}"
 
 
-def write_kmz(path, cl, z, g, cls, contours, events, steep, towns, low_conf):
+def write_kmz(path, cl, z, g, cls, contours, events, steep, towns, low_conf, elements, curves):
     def coords(lon, lat):
         return " ".join(f"{x:.6f},{y:.6f}" for x, y in zip(lon, lat))
 
@@ -425,6 +430,9 @@ def write_kmz(path, cl, z, g, cls, contours, events, steep, towns, low_conf):
                '<Style id="flag"><IconStyle><color>ff0000ff</color><Icon><href>'
                'http://maps.google.com/mapfiles/kml/shapes/caution.png</href></Icon></IconStyle>'
                '<LabelStyle><scale>0</scale></LabelStyle></Style>'
+               '<Style id="curve"><IconStyle><color>ffff00ff</color><scale>0.7</scale><Icon><href>'
+               'http://maps.google.com/mapfiles/kml/shapes/placemark_circle.png</href></Icon></IconStyle>'
+               '<LabelStyle><scale>0.7</scale></LabelStyle></Style>'
                '<Style id="bridge"><IconStyle><color>ffffaa00</color><Icon><href>'
                'http://maps.google.com/mapfiles/kml/shapes/square.png</href></Icon></IconStyle>'
                '<LabelStyle><scale>0</scale></LabelStyle></Style>')
@@ -473,6 +481,23 @@ def write_kmz(path, cl, z, g, cls, contours, events, steep, towns, low_conf):
                                           f"<LineString><tessellate>1</tessellate><coordinates>{coords(lon, lat)}"
                                           f"</coordinates></LineString>"))
 
+    tight, k = [], 0
+    for el in elements:
+        if el["type"] != "curve":
+            continue
+        row = curves[k]
+        k += 1
+        if row["Radius (m)"] >= 250:
+            continue
+        c, am = el["centre"], math.atan2(el["start"][1] - el["centre"][1], el["start"][0] - el["centre"][0]) + el["delta"] / 2
+        lon, lat = TO_LL.transform(c[0] + el["R"] * math.cos(am), c[1] + el["R"] * math.sin(am))
+        tight.append(placemark(
+            f"{row['Curve']} R{row['Radius (m)']:.0f}", "curve",
+            f"<Point><coordinates>{lon:.6f},{lat:.6f}</coordinates></Point>",
+            f"{row['Curve']}: radius {row['Radius (m)']:.0f} m, turns {row['Turns'].lower()} "
+            f"{row['Deflection (deg)']:.1f}&deg;, arc {row['Arc length (m)']:.0f} m<br>"
+            f"km {row['TC chainage (km)']:.3f} - {row['CT chainage (km)']:.3f}"))
+
     steep_rows = "".join(
         f"<tr><td>{s['ch_from'] / 1000:.2f}-{s['ch_to'] / 1000:.2f}</td><td>{s['length_m']:.0f} m</td>"
         f"<td>{s['avg_grade']:+.1f}%</td><td>{s['max_grade']:.1f}%</td></tr>" for s in steep)
@@ -489,6 +514,7 @@ def write_kmz(path, cl, z, g, cls, contours, events, steep, towns, low_conf):
            + folder("Kilometre markers", kms)
            + folder("Profile problems found and corrected", flags)
            + folder("Bridges", bridges)
+           + folder("Curves under 250 m radius (fitted alignment)", tight)
            + folder(f"Position-sensitive sections (height changes >{SENSITIVE:.0f} m if centreline {POSITION_ERROR} m out)", lowc)
            + folder("Contours 50 m (index)", cont[True])
            + folder("Contours 10 m", cont[False])
@@ -501,11 +527,12 @@ def write_kmz(path, cl, z, g, cls, contours, events, steep, towns, low_conf):
         zf.writestr("doc.kml", doc)
 
 
-def write_plan_dxf(path, cl, z, cls, contours, events, steep):
+def write_plan_dxf(path, cl, z, cls, contours, events, steep, elements):
     doc = ezdxf.new("R2010", setup=True)
     doc.header["$INSUNITS"] = 6  # metres
     layers = {"CONTOUR_10M": 33, "CONTOUR_INDEX_50M": 34, "CENTRELINE": 7, "CHAINAGE": 7,
-              "GRADE_0-4": 3, "GRADE_4-6": 2, "GRADE_6-8": 30, "GRADE_GT8": 1, "PROFILE_FLAGS": 6}
+              "GRADE_0-4": 3, "GRADE_4-6": 2, "GRADE_6-8": 30, "GRADE_GT8": 1, "PROFILE_FLAGS": 6,
+              "ALIGNMENT_FITTED": 4, "CURVE_LABELS": 4}
     for name, color in layers.items():
         doc.layers.add(name, color=color)
     msp = doc.modelspace()
@@ -514,6 +541,20 @@ def write_plan_dxf(path, cl, z, cls, contours, events, steep):
             "layer": "CONTOUR_INDEX_50M" if c["index"] else "CONTOUR_10M", "elevation": float(c["z"])})
     e, n = TO_UTM.transform(cl["lon"], cl["lat"])
     msp.add_polyline3d(list(zip(e, n, z)), dxfattribs={"layer": "CENTRELINE"})
+    k = 0
+    for el in elements:
+        if el["type"] == "line":
+            msp.add_line(tuple(el["start"]), tuple(el["end"]), dxfattribs={"layer": "ALIGNMENT_FITTED"})
+            continue
+        k += 1
+        c, R = el["centre"], el["R"]
+        a0 = math.atan2(el["start"][1] - c[1], el["start"][0] - c[0])
+        a1 = math.atan2(el["end"][1] - c[1], el["end"][0] - c[0])
+        start, end = (a0, a1) if el["delta"] > 0 else (a1, a0)
+        msp.add_arc(tuple(c), R, math.degrees(start), math.degrees(end), dxfattribs={"layer": "ALIGNMENT_FITTED"})
+        am = a0 + el["delta"] / 2
+        msp.add_text(f"C{k} R{R:.0f}", height=8, dxfattribs={"layer": "CURVE_LABELS"}).set_placement(
+            (c[0] + (R + 15) * math.cos(am), c[1] + (R + 15) * math.sin(am)))
     grade_layers = ["GRADE_0-4", "GRADE_4-6", "GRADE_6-8", "GRADE_GT8"]
     breaks = np.flatnonzero(np.diff(cls)) + 1
     for s0, s1 in zip(np.r_[0, breaks], np.r_[breaks, len(cls)]):
@@ -583,29 +624,92 @@ def write_long_section_dxf(path, cl, z_raw, z, g, events, steep, towns, vex=10):
 
 
 def civil3d_alignment(cl):
-    """Alignment in UTM 35S (straight segments within 1 m of the mapped centreline) and the
-    station of every profile point on it. Civil 3D stations are grid distances, so they run
-    slightly ahead of the ground (geodesic) chainage used elsewhere in this package."""
+    """Fitted alignment (straights and circular curves, UTM 35S) and the Civil 3D station of every
+    profile point on it. Stations are grid distances along the fitted alignment, so they differ
+    slightly from the ground (geodesic) chainage used elsewhere in this package."""
     e, n = TO_UTM.transform(cl["lon"], cl["lat"])
-    align = shapely.LineString(zip(e, n)).simplify(1.0)
-    return align, np.array([align.project(shapely.Point(p)) for p in zip(e, n)])
+    elements, dev, _ = fit_alignment(e, n)
+    coords = np.asarray(Fitter.polyline(elements).coords)
+    seg = np.diff(coords, axis=0)
+    seg_len = np.hypot(seg[:, 0], seg[:, 1])
+    cum = np.r_[0, np.cumsum(seg_len)]
+    tree = shapely.STRtree(shapely.linestrings(np.stack([coords[:-1], coords[1:]], axis=1)))
+    _, j = tree.query_nearest(shapely.points(e, n), all_matches=False)
+    t = np.clip(np.einsum("ij,ij->i", np.c_[e, n] - coords[j], seg[j]) / seg_len[j] ** 2, 0, 1)
+    sta = np.maximum.accumulate(cum[j] + t * seg_len[j])
+    return elements, sta, dev
 
 
-def write_landxml(path, align, sta, z, z_cop):
-    """Civil 3D: alignment with corrected and raw existing-ground profiles."""
-    pts = np.array(align.coords)
+def curve_rows(elements, sta, cl):
+    """One record per curve for the curve table."""
+    def dms(deg):
+        d = int(deg)
+        m = int((deg - d) * 60)
+        return f"{d}\u00b0{m:02d}'{(deg - d - m / 60) * 3600:04.1f}\""
+
+    rows, k = [], 0
+    for i, el in enumerate(elements):
+        if el["type"] != "curve":
+            continue
+        k += 1
+        R, d = el["R"], abs(el["delta"])
+        nxt = elements[i + 1] if i + 1 < len(elements) else None
+        if nxt is None:
+            to_next, joins = None, ""
+        else:
+            # A straight under 1 m between two curves is treated as none (compound or reverse curve).
+            after = nxt if nxt["type"] == "curve" else (elements[i + 2] if i + 2 < len(elements) else None)
+            to_next = 0.0 if nxt["type"] == "curve" else nxt["length"]
+            joins = ""
+            if after is not None and after["type"] == "curve" and to_next < 1.0:
+                joins = "Compound" if (after["delta"] > 0) == (el["delta"] > 0) else "Reverse"
+        tc, ct = el["sta"], el["sta"] + el["length"]
+        pi_lon, pi_lat = TO_LL.transform(*el["pi"])
+        rows.append({
+            "Curve": f"C{k}", "Turns": "Left" if el["delta"] > 0 else "Right",
+            "Radius (m)": round(R, 1),
+            "Radius class": ("< 100 m" if R < 100 else "100-250 m" if R < 250 else "250-500 m" if R < 500
+                             else "500-1000 m" if R < 1000 else "1000 m or more"),
+            "Deflection (deg)": round(math.degrees(d), 4), "Deflection (DMS)": dms(math.degrees(d)),
+            "Arc length (m)": round(el["length"], 2), "Tangent length T (m)": round(el["T"], 2),
+            "External E (m)": round(R * (1 / math.cos(d / 2) - 1), 2), "Chord (m)": round(2 * R * math.sin(d / 2), 2),
+            "TC station (m)": round(tc, 2), "PI station (m)": round(tc + el["T"], 2), "CT station (m)": round(ct, 2),
+            "TC chainage (km)": round(float(np.interp(tc, sta, cl["ch"])) / 1000, 3),
+            "CT chainage (km)": round(float(np.interp(ct, sta, cl["ch"])) / 1000, 3),
+            "Straight to next curve (m)": None if to_next is None else round(to_next, 1),
+            "Joins next curve as": joins,
+            "PI easting (m)": round(el["pi"][0], 3), "PI northing (m)": round(el["pi"][1], 3),
+            "PI latitude": round(pi_lat, 7), "PI longitude": round(pi_lon, 7)})
+    return rows
+
+
+def write_landxml(path, elements, sta, z, z_cop, fit_note):
+    """Civil 3D: alignment (lines and circular curves) with corrected and raw existing-ground profiles."""
     every = STATION // STEP
     idx = np.unique(np.r_[np.arange(0, len(sta), every), len(sta) - 1])
+    idx = idx[np.r_[True, np.diff(sta[idx]) > 0.001]]  # stations must increase
 
     def plist(values):
         return " ".join(f"{sta[i]:.2f} {values[i]:.2f}" for i in idx)
 
-    lines, st = [], 0.0
-    for (x0, y0), (x1, y1) in zip(pts[:-1], pts[1:]):
-        length = math.hypot(x1 - x0, y1 - y0)
-        lines.append(f'<Line staStart="{st:.3f}" length="{length:.3f}"><Start>{y0:.3f} {x0:.3f}</Start>'
-                     f"<End>{y1:.3f} {x1:.3f}</End></Line>")
-        st += length
+    def ne(pt):
+        return f"{pt[1]:.6f} {pt[0]:.6f}"
+
+    geom = []
+    for el in elements:
+        if el["type"] == "line":
+            geom.append(f'<Line staStart="{el["sta"]:.4f}" length="{el["length"]:.4f}">'
+                        f'<Start>{ne(el["start"])}</Start><End>{ne(el["end"])}</End></Line>')
+            continue
+        R, d = el["R"], abs(el["delta"])
+        geom.append(
+            f'<Curve rot="{"ccw" if el["delta"] > 0 else "cw"}" crvType="arc" staStart="{el["sta"]:.4f}" '
+            f'length="{el["length"]:.4f}" radius="{R:.4f}" delta="{math.degrees(d):.6f}" '
+            f'tangent="{el["T"]:.4f}" chord="{2 * R * math.sin(d / 2):.4f}" '
+            f'external="{R * (1 / math.cos(d / 2) - 1):.4f}" midOrd="{R * (1 - math.cos(d / 2)):.4f}">'
+            f'<Start>{ne(el["start"])}</Start><Center>{ne(el["centre"])}</Center><End>{ne(el["end"])}</End>'
+            f'<PI>{ne(el["pi"])}</PI></Curve>')
+    total = elements[-1]["sta"] + elements[-1]["length"]
     xml = ('<?xml version="1.0" encoding="UTF-8"?>\n'
            '<LandXML xmlns="http://www.landxml.org/schema/LandXML-1.2" version="1.2" '
            f'date="{pd.Timestamp.now():%Y-%m-%d}" time="{pd.Timestamp.now():%H:%M:%S}">\n'
@@ -616,9 +720,9 @@ def write_landxml(path, align, sta, z, z_cop):
            'verticalDatum="EGM2008"/>\n'
            '<Application name="build_a1_corridor.py" desc="A1 Harare-Chirundu inception terrain package"/>\n'
            '<Alignments name="A1 Harare-Chirundu">\n'
-           f'<Alignment name="A1 Harare-Chirundu centreline" length="{st:.3f}" staStart="0" '
-           'desc="Mapped centreline (OpenStreetMap via Overture), straight segments within 1 m">\n'
-           f"<CoordGeom>{''.join(lines)}</CoordGeom>\n"
+           f'<Alignment name="A1 Harare-Chirundu centreline" length="{total:.4f}" staStart="0" '
+           f'desc="{escape(fit_note)}">\n'
+           f"<CoordGeom>{''.join(geom)}</CoordGeom>\n"
            '<Profile name="Existing ground">\n'
            f'<ProfSurf name="EG corrected (Copernicus, bridges and spikes removed)"><PntList2D>{plist(z)}'
            "</PntList2D></ProfSurf>\n"
@@ -626,7 +730,7 @@ def write_landxml(path, align, sta, z, z_cop):
            "</Profile>\n</Alignment>\n</Alignments>\n</LandXML>\n")
     with open(path, "w") as f:
         f.write(xml)
-    return st, len(lines)
+    return total
 
 
 def write_surface_tif(path, arr, transform, corridor_utm, res=30):
@@ -647,7 +751,8 @@ def write_surface_tif(path, arr, transform, corridor_utm, res=30):
         dst.write(out, 1)
 
 
-def write_excel(path, cl, sta, z_cop, z_srtm, z, g, sens, events, steep, towns, crossings, low_conf, meta):
+def write_excel(path, cl, sta, z_cop, z_srtm, z, g, sens, events, steep, towns, crossings, low_conf, meta,
+                curves):
     e, n = TO_UTM.transform(cl["lon"], cl["lat"])
     every = STATION // STEP
     idx = np.r_[np.arange(0, len(cl["ch"]), every), len(cl["ch"]) - 1]
@@ -685,6 +790,7 @@ def write_excel(path, cl, sta, z_cop, z_srtm, z, g, sens, events, steep, towns, 
     with pd.ExcelWriter(path, engine="openpyxl") as xl:
         about.to_excel(xl, sheet_name="About", index=False)
         st.to_excel(xl, sheet_name="Steep sections", index=False)
+        pd.DataFrame(curves).to_excel(xl, sheet_name="Curve table", index=False)
         ev.to_excel(xl, sheet_name="Profile problems", index=False)
         lc.to_excel(xl, sheet_name="Position-sensitive sections", index=False)
         tw.to_excel(xl, sheet_name="Towns", index=False)
@@ -850,6 +956,18 @@ def main(out_dir, cache):
     contours = make_contours(cop, cop_t, corridor_polygon(cl))
     print(f"  {len(contours)} contour lines")
 
+    print("Alignment...")
+    elements, sta, fit_dev = civil3d_alignment(cl)
+    curves = curve_rows(elements, sta, cl)
+    radii = np.array([c["Radius (m)"] for c in curves])
+    tightest = curves[int(np.argmin(radii))]
+    align_len = elements[-1]["sta"] + elements[-1]["length"]
+    n_lines = sum(el["type"] == "line" for el in elements)
+    fit_note = (f"{n_lines} straights and {len(curves)} circular curves (no spirals) fitted to the mapped "
+                f"centreline; 95% of the mapped line within {np.percentile(fit_dev, 95):.1f} m, "
+                f"maximum {fit_dev.max():.1f} m")
+    print(f"  {fit_note}")
+
     diff = z_cop - z_srtm
     meta = {
         "Road": "A1 Harare-Chirundu (now numbered R3); km 0 in central Harare at "
@@ -865,9 +983,12 @@ def main(out_dir, cache):
                     "DEM lightly smoothed (30 m Gaussian) before contouring",
         "Coordinates": "WGS 84 lat/long; DXF plan, LandXML and GeoTIFF in WGS 84 / UTM zone 35S (EPSG:32735). "
                        "Near Harare (outside zone 35) UTM distances read about 0.2% long",
-        "Chainage vs Civil 3D station": "Chainage is measured on the ground (ellipsoid). Civil 3D stations are "
-                                        "UTM grid distances and run about 0.07% ahead (242 m by Chirundu); "
-                                        "both are listed in the profile sheet",
+        "Alignment": f"{fit_note}. Tightest curve: {tightest['Curve']}, radius {tightest['Radius (m)']:.0f} m "
+                     f"at km {tightest['TC chainage (km)']:.1f}. Radii are estimates from mapped data.",
+        "Chainage vs Civil 3D station": "Chainage is measured on the ground (ellipsoid) along the mapped road. "
+                                        "Civil 3D stations are UTM grid distances along the fitted alignment "
+                                        f"({align_len / 1000:.3f} km in total, {align_len - cl['ch'][-1]:+.0f} m "
+                                        "against chainage at Chirundu); both are listed in the profile sheet",
         "Copernicus minus SRTM along road": f"median {np.nanmedian(diff):+.1f} m, 90% within "
                                             f"{np.nanpercentile(np.abs(diff), 90):.1f} m",
         "Why profiles show sudden drops": (
@@ -881,14 +1002,13 @@ def main(out_dir, cache):
                     "a ground survey for that.",
     }
     stem = os.path.join(out_dir, "A1_Harare_Chirundu")
-    write_kmz(stem + "_terrain.kmz", cl, z, g, cls, contours, events, steep, towns, low_conf)
-    write_plan_dxf(stem + "_plan_contours_UTM35S.dxf", cl, z, cls, contours, events, steep)
+    write_kmz(stem + "_terrain.kmz", cl, z, g, cls, contours, events, steep, towns, low_conf, elements, curves)
+    write_plan_dxf(stem + "_plan_contours_UTM35S.dxf", cl, z, cls, contours, events, steep, elements)
     write_long_section_dxf(stem + "_long_section.dxf", cl, z_cop, z, g, events, steep, towns)
-    align, sta = civil3d_alignment(cl)
-    align_len, n_lines = write_landxml(stem + "_Civil3D_alignment_profile.xml", align, sta, z, z_cop)
+    write_landxml(stem + "_Civil3D_alignment_profile.xml", elements, sta, z, z_cop, fit_note)
     write_surface_tif(stem + "_Civil3D_surface_DEM_UTM35S.tif", cop, cop_t, corridor_polygon(cl))
     write_excel(stem + "_profile_and_steep_sections.xlsx", cl, sta, z_cop, z_srtm, z, g, sens, events, steep,
-                towns, crossings, low_conf, meta)
+                towns, crossings, low_conf, meta, curves)
     zoom = plot_profile(stem + "_profile.png", cl, z_cop, z_srtm, z, g, events, steep, towns, low_conf)
     plot_map(stem + "_steep_sections_map.png", cop, cop_t, cl, g, towns, steep, zoom)
     summary = {"length_km": round(cl["ch"][-1] / 1000, 2), "bridges": len(cl["bridges"]),
@@ -896,7 +1016,9 @@ def main(out_dir, cache):
                "towns": [(t["name"], round(t["ch"] / 1000, 1)) for t in towns],
                "elev_start": round(float(z[0])), "elev_end": round(float(z[-1])),
                "max_raw_drop": round(max((e["max_drop_m"] for e in events), default=0), 1),
-               "landxml_alignment_m": round(align_len, 1), "landxml_lines": n_lines}
+               "alignment_m": round(align_len, 1), "straights": n_lines, "curves": len(curves),
+               "min_radius_m": round(float(radii.min()), 1),
+               "fit_p95_m": round(float(np.percentile(fit_dev, 95)), 2), "fit_max_m": round(float(fit_dev.max()), 2)}
     with open(os.path.join(cache, "summary.json"), "w") as f:
         json.dump(summary, f, indent=1)
     print(json.dumps(summary, indent=1))

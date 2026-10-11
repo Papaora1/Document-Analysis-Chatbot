@@ -15,6 +15,7 @@ this is **inception level**: good for comparing routes and spotting problem sect
 | Escarpment | km 290–315: Makuti (1,190 m) down to 556 m, 634 m fall; steepest point 11.6% at km 311.7 |
 | Steep sections (6% or more over 200 m) | 28 sections, listed in the Excel file |
 | Largest raw drop in the profile | 9 m, at the Manyame River bridge (km 113.6), corrected |
+| Horizontal alignment | 484 straights and 578 circular curves; tightest radius 29 m (Chirundu border approach, km 351.5) and 36 m on the escarpment (km 311.4) |
 
 ![Escarpment](A1_Harare_Chirundu_km290-315_escarpment.png)
 
@@ -30,16 +31,38 @@ centreline not being on the real road:
 Every profile point in the Excel file shows how much its height would change if the centreline
 were 30 m out. The pink bands on the charts mark where that change is more than 5 m.
 
+## Horizontal alignment and curve table
+
+The alignment is fitted to the mapped centreline by the PI method (`alignment_fit.py`): straights are
+fitted to the straight parts of the road, consecutive straights intersect at PIs, and each curve gets the
+flattest radius that still fits the mapped road. Hairpins over 110° are set out as compound curves. The
+fitted alignment is within 1.7 m of the mapped road for 95% of its length and 4.1 m at worst, with no
+gaps or kinks between elements.
+
+| Radius | Curves |
+|---|---|
+| under 100 m | 22 |
+| 100–250 m | 53 |
+| 250–500 m | 106 |
+| 500–1000 m | 148 |
+| 1000 m or more | 249 |
+
+67 curves run straight into a curve in the same direction (compound) and 30 into a curve in the
+opposite direction (reverse). The **Curve table** sheet in the Excel file lists every curve: radius,
+deflection, arc and tangent lengths, external, chord, TC/PI/CT stations, ground chainage, the straight
+to the next curve, and PI coordinates. The radii are estimates from mapped data (typically 5–10 m
+accurate). Use them to flag substandard curves, not as design values. No transition spirals are fitted.
+
 ## Files
 
 | File | Open with | Contents |
 |---|---|---|
-| `A1_Harare_Chirundu_terrain.kmz` | Google Earth | Centreline coloured by gradient, km markers, 10 m and 50 m contours, bridges, flagged problems |
-| `A1_Harare_Chirundu_plan_contours_UTM35S.dxf` | AutoCAD | Contours with elevations (10 m and 50 m layers), 3D centreline, gradient layers, km ticks |
+| `A1_Harare_Chirundu_terrain.kmz` | Google Earth | Centreline coloured by gradient, km markers, 10 m and 50 m contours, bridges, flagged problems, curves under 250 m radius |
+| `A1_Harare_Chirundu_plan_contours_UTM35S.dxf` | AutoCAD | Contours with elevations (10 m and 50 m layers), 3D centreline, fitted alignment as lines and arcs with curve labels, gradient layers, km ticks |
 | `A1_Harare_Chirundu_long_section.dxf` | AutoCAD | Long section, vertical exaggeration ×10, raw and corrected ground, steep-section bars |
-| `A1_Harare_Chirundu_Civil3D_alignment_profile.xml` | Civil 3D | LandXML alignment with two existing-ground profiles (corrected and raw) |
+| `A1_Harare_Chirundu_Civil3D_alignment_profile.xml` | Civil 3D | LandXML alignment (lines and circular curves) with two existing-ground profiles (corrected and raw) |
 | `A1_Harare_Chirundu_Civil3D_surface_DEM_UTM35S.tif` | Civil 3D, QGIS | 30 m ground surface for the 2 km wide corridor |
-| `A1_Harare_Chirundu_profile_and_steep_sections.xlsx` | Excel | Steep sections, profile problems, towns, km markers, profile every 20 m |
+| `A1_Harare_Chirundu_profile_and_steep_sections.xlsx` | Excel | Steep sections, curve table, profile problems, towns, km markers, profile every 20 m |
 | `A1_Harare_Chirundu_profile.png` | Any | Full profile and gradient band |
 | `A1_Harare_Chirundu_steep_sections_map.png` | Any | Map of gradients with an escarpment zoom |
 | `A1_Harare_Chirundu_km290-315_escarpment.png` | Any | Close-up of the escarpment |
@@ -49,11 +72,10 @@ were 30 m out. The pink bands on the charts mark where that change is more than 
 1. Set the drawing coordinate system to **UTM84-35S** (Settings → Drawing Settings → Units and Zone).
 2. **Surface:** Create Surface (TIN) → Definition → DEM Files → Add → the `.tif`.
    Or add the contour polylines from the plan DXF as contour data.
-3. **Alignment and profile:** Insert → LandXML → the `.xml`. This creates the alignment and the two
-   existing-ground profiles. The alignment is straight segments within 1 m of the mapped road; fit
-   curves before design work.
-4. Civil 3D stations are UTM grid distances, which run about 0.07% ahead of ground chainage (242 m by
-   Chirundu). The Excel profile lists both.
+3. **Alignment and profile:** Insert → LandXML → the `.xml`. This creates the alignment, with its
+   straights and curves, and the two existing-ground profiles.
+4. Civil 3D stations are UTM grid distances along the fitted alignment (352.882 km in total, 107 m more
+   than the ground chainage at Chirundu). The Excel profile and curve table list both.
 
 ## Sources and accuracy
 
